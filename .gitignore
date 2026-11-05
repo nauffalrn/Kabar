@@ -1,0 +1,21 @@
+# build output
+bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# env / secrets
+.env
+.env.*
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# local tooling & private notes (not part of the submission repo)
+.claude/
+CLAUDE.md
+*.pdf
