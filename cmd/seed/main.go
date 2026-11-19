@@ -21,6 +21,8 @@ import (
 
 const syndicationName = "Syndication Wire"
 
+var categories = []string{"nasional", "ekonomi", "teknologi", "gaya-hidup", "olahraga"}
+
 var (
 	firstNames = []string{"Budi", "Siti", "Agus", "Dewi", "Andi", "Rina", "John", "Maria", "Eko", "Putri"}
 	lastNames  = []string{"Santoso", "Wijaya", "Pratama", "Lestari", "Smith", "Hidayat", "Saputra", "Nugroho"}
@@ -54,7 +56,7 @@ func main() {
 	start := time.Now()
 	src := &articleSource{total: *nArticles, share: *share, days: *days, authors: authors, now: time.Now()}
 	n, err := pool.CopyFrom(ctx, pgx.Identifier{"articles"},
-		[]string{"id", "author_id", "title", "body", "created_at", "updated_at"}, src)
+		[]string{"id", "author_id", "category_id", "title", "body", "created_at", "updated_at"}, src)
 	must(err)
 	log.Printf("articles: %d in %s", n, time.Since(start).Round(time.Second))
 
@@ -97,7 +99,8 @@ func (s *articleSource) Values() ([]any, error) {
 		authorID = s.authors[1+rand.IntN(len(s.authors)-1)][0]
 	}
 	created := s.now.Add(-time.Duration(rand.Int64N(int64(s.days) * int64(24*time.Hour))))
-	return []any{newID(), authorID, sentence(6), sentence(30), created, created}, nil
+	category := categories[rand.IntN(len(categories))]
+	return []any{newID(), authorID, category, sentence(6), sentence(30), created, created}, nil
 }
 
 func sentence(n int) string {
