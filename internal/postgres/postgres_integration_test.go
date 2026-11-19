@@ -101,7 +101,7 @@ func TestCreateArticle_ReturnsAuthorAndEnqueues(t *testing.T) {
 	repo := NewArticleRepo(pool)
 	authorID := mustAuthor(t, pool, "Budi")
 
-	got, err := repo.CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: authorID, Title: "Judul", Body: "Isi"})
+	got, err := repo.CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: authorID, Title: "Judul", Body: "Isi"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestCreateArticle_ReturnsAuthorAndEnqueues(t *testing.T) {
 
 func TestCreateArticle_UnknownAuthor(t *testing.T) {
 	pool := newTestDB(t)
-	_, err := NewArticleRepo(pool).CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: "missing", Title: "t", Body: "b"})
+	_, err := NewArticleRepo(pool).CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: "missing", Title: "t", Body: "b"}, nil)
 	if !errors.Is(err, article.ErrAuthorNotFound) {
 		t.Fatalf("want ErrAuthorNotFound, got %v", err)
 	}
@@ -127,10 +127,10 @@ func TestCreateArticle_UnknownAuthor(t *testing.T) {
 func TestUpdateArticle(t *testing.T) {
 	pool := newTestDB(t)
 	repo := NewArticleRepo(pool)
-	created, _ := repo.CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: mustAuthor(t, pool, "A"), Title: "old", Body: "body"})
+	created, _ := repo.CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: mustAuthor(t, pool, "A"), Title: "old", Body: "body"}, nil)
 
 	title := "new"
-	got, err := repo.UpdateArticle(context.Background(), created.ID, article.UpdateArticleInput{Title: &title})
+	got, err := repo.UpdateArticle(context.Background(), created.ID, article.ArticleChanges{Title: &title})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestUpdateArticle(t *testing.T) {
 		t.Fatalf("want 2 outbox events (create + update), got %d", n)
 	}
 
-	if _, err := repo.UpdateArticle(context.Background(), "missing", article.UpdateArticleInput{Title: &title}); !errors.Is(err, article.ErrNotFound) {
+	if _, err := repo.UpdateArticle(context.Background(), "missing", article.ArticleChanges{Title: &title}); !errors.Is(err, article.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
@@ -217,9 +217,9 @@ func TestList_AuthorNameMapsToSeveralIDs(t *testing.T) {
 func TestOutbox_ProcessBatch(t *testing.T) {
 	pool := newTestDB(t)
 	repo := NewArticleRepo(pool)
-	a, _ := repo.CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: mustAuthor(t, pool, "A"), Title: "v1", Body: "b"})
+	a, _ := repo.CreateArticle(context.Background(), article.Article{ID: id(), AuthorID: mustAuthor(t, pool, "A"), Title: "v1", Body: "b"}, nil)
 	v2 := "v2"
-	_, _ = repo.UpdateArticle(context.Background(), a.ID, article.UpdateArticleInput{Title: &v2})
+	_, _ = repo.UpdateArticle(context.Background(), a.ID, article.ArticleChanges{Title: &v2})
 
 	outbox := NewOutboxRepo(pool)
 
@@ -255,7 +255,7 @@ func TestService_EndToEndBrowse(t *testing.T) {
 	pool := newTestDB(t)
 	repo := NewArticleRepo(pool)
 	svc := article.NewService(article.Deps{
-		Writer: repo, Authors: NewAuthorRepo(pool), Browser: repo,
+		Writer: repo, Store: repo, Authors: NewAuthorRepo(pool), Categories: NewCategoryRepo(pool), Browser: repo,
 		NewID: func() string { return id() },
 	})
 	ctx := context.Background()
@@ -265,7 +265,7 @@ func TestService_EndToEndBrowse(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 3 {
-		if _, err := svc.CreateArticle(ctx, article.CreateArticleInput{AuthorID: au.ID, Title: fmt.Sprint("t", i), Body: "b"}); err != nil {
+		if _, err := svc.CreateArticle(ctx, &article.Actor{AuthorID: au.ID}, article.CreateArticleInput{Title: fmt.Sprint("t", i), Body: "b", Category: "ekonomi"}); err != nil {
 			t.Fatal(err)
 		}
 	}

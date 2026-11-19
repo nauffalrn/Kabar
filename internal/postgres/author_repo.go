@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,4 +27,18 @@ func (r *AuthorRepo) FindAuthorIDsByName(ctx context.Context, name string) ([]st
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// GetProfile counts through articles_author_created_at_id_idx.
+func (r *AuthorRepo) GetProfile(ctx context.Context, id string) (article.AuthorProfile, error) {
+	var p article.AuthorProfile
+	err := r.pool.QueryRow(ctx, `
+		SELECT au.id, au.name, au.created_at,
+		       (SELECT count(*) FROM articles a WHERE a.author_id = au.id AND a.deleted_at IS NULL)
+		FROM authors au WHERE au.id = $1`, id,
+	).Scan(&p.ID, &p.Name, &p.JoinedAt, &p.ArticleCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, article.ErrAuthorNotFound
+	}
+	return p, err
 }
