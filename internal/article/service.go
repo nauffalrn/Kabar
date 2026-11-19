@@ -2,18 +2,26 @@ package article
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 )
 
 type Deps struct {
-	Writer  ArticleWriter
-	Authors AuthorStore
-	Browser Reader // used when there is no keyword (Postgres)
-	Search  Reader // used when there is a keyword (Elasticsearch)
-	Cache   PageCache
-	NewID   func() string
+	Writer     ArticleWriter
+	Store      ArticleStore
+	Authors    AuthorStore
+	Categories CategoryStore
+	Browser    Reader // used when there is no keyword (Postgres)
+	Search     Reader // used when there is a keyword (Elasticsearch)
+	Images     ImageStore
+	Likes      LikeStore
+	Comments   CommentStore
+	Processor  ImageProcessor
+	Objects    ObjectStore
+	Cache      PageCache
+	NewID      func() string
 }
 
 type Service struct{ d Deps }
@@ -27,7 +35,7 @@ func NewService(d Deps) *Service {
 
 func (s *Service) CreateAuthor(ctx context.Context, name string) (Author, error) {
 	name = NormalizeAuthorName(name)
-	if err := validateAuthorName(name); err != nil {
+	if err := ValidateAuthorName(name); err != nil {
 		return Author{}, err
 	}
 	a := Author{ID: s.d.NewID(), Name: name}
@@ -37,33 +45,20 @@ func (s *Service) CreateAuthor(ctx context.Context, name string) (Author, error)
 	return a, nil
 }
 
-func (s *Service) CreateArticle(ctx context.Context, in CreateArticleInput) (Article, error) {
-	in.normalize()
-	if err := in.validate(); err != nil {
-		return Article{}, err
-	}
-	a, err := s.d.Writer.CreateArticle(ctx, Article{
-		ID:       s.d.NewID(),
-		AuthorID: in.AuthorID,
-		Title:    in.Title,
-		Body:     in.Body,
-	})
-	if err != nil {
-		return Article{}, fmt.Errorf("create article: %w", err)
-	}
-	return a, nil
+func (s *Service) ListCategories(ctx context.Context) ([]Category, error) {
+	return s.d.Categories.ListCategories(ctx)
 }
 
-func (s *Service) UpdateArticle(ctx context.Context, id string, in UpdateArticleInput) (Article, error) {
-	in.normalize()
-	if err := in.validate(); err != nil {
-		return Article{}, err
+func (s *Service) GetAuthorProfile(ctx context.Context, id string) (AuthorProfile, error) {
+	return s.d.Authors.GetProfile(ctx, id)
+}
+
+func (s *Service) GetArticle(ctx context.Context, id string, viewer *Actor) (Article, error) {
+	userID := ""
+	if viewer != nil {
+		userID = viewer.UserID
 	}
-	a, err := s.d.Writer.UpdateArticle(ctx, id, in)
-	if err != nil {
-		return Article{}, fmt.Errorf("update article: %w", err)
-	}
-	return a, nil
+	return s.d.Store.GetArticle(ctx, id, userID)
 }
 
 // ListArticles returns one page, newest first; identical requests share one backend call.
@@ -80,7 +75,10 @@ func (s *Service) ListArticles(ctx context.Context, q ListQuery) (Page, error) {
 func (s *Service) listArticles(ctx context.Context, q ListQuery) (Page, error) {
 	params := ListParams{Query: q.Query, After: q.After, Limit: q.Limit + 1} // +1 tells us if a next page exists
 
-	if q.AuthorName != "" {
+	switch {
+	case q.AuthorID != "":
+		params.AuthorIDs = []string{q.AuthorID}
+	case q.AuthorName != "":
 		ids, err := s.d.Authors.FindAuthorIDsByName(ctx, q.AuthorName)
 		if err != nil {
 			return Page{}, fmt.Errorf("resolve author name: %w", err)
@@ -91,11 +89,51 @@ func (s *Service) listArticles(ctx context.Context, q ListQuery) (Page, error) {
 		params.AuthorIDs = ids
 	}
 
+	if q.Category != "" {
+		c, err := s.d.Categories.FindCategoryBySlug(ctx, q.Category)
+		if errors.Is(err, ErrCategoryNotFound) {
+			return Page{}, NewValidationError("category", "unknown category")
+		}
+		if err != nil {
+			return Page{}, fmt.Errorf("resolve category: %w", err)
+		}
+		params.CategoryID = c.ID
+	}
+
 	rows, err := s.readerFor(q).List(ctx, params)
 	if err != nil {
 		return Page{}, fmt.Errorf("list articles: %w", err)
 	}
-	return toPage(rows, q.Limit), nil
+	page := toPage(rows, q.Limit)
+	if s.d.Store != nil && len(page.Articles) > 0 {
+		enriched, err := s.d.Store.Enrich(ctx, page.Articles)
+		if err != nil {
+			return Page{}, fmt.Errorf("enrich articles: %w", err)
+		}
+		page.Articles = withoutDeleted(enriched)
+	}
+	return page, nil
+}
+
+// ListFeatured feeds the illustrated strip on the home page; it shares the
+// page cache, so a burst on the home page still costs one query.
+func (s *Service) ListFeatured(ctx context.Context, limit int) ([]Article, error) {
+	limit = pageSize(limit)
+	page, err := s.d.Cache.GetOrLoad(ctx, "featured|l="+strconv.Itoa(limit), func(ctx context.Context) (Page, error) {
+		rows, err := s.d.Store.ListIllustrated(ctx, limit)
+		if err != nil {
+			return Page{}, fmt.Errorf("list featured: %w", err)
+		}
+		if len(rows) == 0 {
+			return Page{Articles: []Article{}}, nil
+		}
+		rows, err = s.d.Store.Enrich(ctx, rows)
+		if err != nil {
+			return Page{}, fmt.Errorf("enrich featured: %w", err)
+		}
+		return Page{Articles: rows}, nil
+	})
+	return page.Articles, err
 }
 
 // readerFor: Postgres for plain browsing, Elasticsearch for keyword search.
@@ -118,6 +156,17 @@ func toPage(rows []Article, limit int) Page {
 	return Page{Articles: rows, NextCursor: &next}
 }
 
+// Search may briefly return an article that was just deleted in Postgres.
+func withoutDeleted(rows []Article) []Article {
+	out := rows[:0]
+	for _, a := range rows {
+		if !a.Deleted {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // strconv.Quote keeps different inputs from colliding through the separator.
 func (q ListQuery) cacheKey() string {
 	cursor := ""
@@ -126,8 +175,10 @@ func (q ListQuery) cacheKey() string {
 	}
 	return "q=" + strconv.Quote(strings.ToLower(q.Query)) +
 		"|a=" + strconv.Quote(strings.ToLower(q.AuthorName)) +
+		"|ai=" + strconv.Quote(q.AuthorID) +
+		"|c=" + strconv.Quote(q.Category) +
 		"|l=" + strconv.Itoa(q.Limit) +
-		"|c=" + cursor
+		"|cur=" + cursor
 }
 
 type noCache struct{}
