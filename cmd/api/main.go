@@ -13,12 +13,15 @@ import (
 
 	"github.com/google/uuid"
 
+	"article-service/internal/account"
 	"article-service/internal/article"
 	"article-service/internal/cache"
 	"article-service/internal/config"
 	"article-service/internal/elasticsearch"
 	"article-service/internal/httpapi"
+	"article-service/internal/media"
 	"article-service/internal/postgres"
+	"article-service/internal/storage"
 	"article-service/migrations"
 )
 
@@ -53,22 +56,44 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	objects, err := storage.Connect(ctx, cfg.Storage)
+	if err != nil {
+		return err
+	}
+
 	articles := postgres.NewArticleRepo(pool)
+	engagement := postgres.NewEngagementRepo(pool)
 	svc := article.NewService(article.Deps{
-		Writer:  articles,
-		Authors: postgres.NewAuthorRepo(pool),
-		Browser: articles,
-		Search:  elasticsearch.NewSearcher(es, cfg.ESIndex.Alias),
-		Cache:   cache.New[article.Page](cfg.Cache.Size, cfg.Cache.TTL, cfg.Cache.LoadTimeout),
-		NewID:   newID,
+		Writer:     articles,
+		Store:      articles,
+		Authors:    postgres.NewAuthorRepo(pool),
+		Categories: postgres.NewCategoryRepo(pool),
+		Browser:    articles,
+		Search:     elasticsearch.NewSearcher(es, cfg.ESIndex.Alias),
+		Images:     postgres.NewImageRepo(pool),
+		Likes:      engagement,
+		Comments:   engagement,
+		Processor:  media.Processor{},
+		Objects:    objects,
+		Cache:      cache.New[article.Page](cfg.Cache.Size, cfg.Cache.TTL, cfg.Cache.LoadTimeout),
+		NewID:      newID,
 	})
 
+	accounts := account.NewService(postgres.NewAccountRepo(pool), newID)
+	if cfg.Admin.Email != "" {
+		if err := accounts.EnsureAdmin(ctx, cfg.Admin.Name, cfg.Admin.Email, cfg.Admin.Password); err != nil {
+			return err
+		}
+	}
+
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewRouter(svc, log),
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.NewRouter(httpapi.Deps{
+			Articles: svc, Accounts: accounts, Media: objects, Log: log, SecureCookies: cfg.SecureCookies,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		ReadTimeout:       30 * time.Second, // image uploads
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 

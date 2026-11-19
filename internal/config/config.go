@@ -11,6 +11,7 @@ import (
 	"article-service/internal/elasticsearch"
 	"article-service/internal/indexer"
 	"article-service/internal/postgres"
+	"article-service/internal/storage"
 )
 
 type Config struct {
@@ -20,6 +21,17 @@ type Config struct {
 	ESIndex  elasticsearch.IndexConfig
 	Cache    CacheConfig
 	Indexer  indexer.Config
+	Storage  storage.Config
+	Admin    AdminConfig
+	// SecureCookies marks the session cookie Secure; enable behind HTTPS.
+	SecureCookies bool
+}
+
+// AdminConfig seeds the first admin on startup; empty email skips it.
+type AdminConfig struct {
+	Name     string
+	Email    string
+	Password string
 }
 
 type CacheConfig struct {
@@ -49,6 +61,19 @@ func Load() (Config, error) {
 			TTL:         e.duration("CACHE_TTL", 2*time.Second),
 			LoadTimeout: e.duration("CACHE_LOAD_TIMEOUT", 5*time.Second),
 		},
+		Storage: storage.Config{
+			Endpoint:  e.str("STORAGE_ENDPOINT", "localhost:8333"),
+			AccessKey: e.str("STORAGE_ACCESS_KEY", "kabar"),
+			SecretKey: e.str("STORAGE_SECRET_KEY", "kabar-secret"),
+			Bucket:    e.str("STORAGE_BUCKET", "kabar-media"),
+			UseSSL:    e.bool("STORAGE_USE_SSL", false),
+		},
+		Admin: AdminConfig{
+			Name:     e.str("ADMIN_NAME", "Admin Kabar"),
+			Email:    e.str("ADMIN_EMAIL", ""),
+			Password: e.str("ADMIN_PASSWORD", ""),
+		},
+		SecureCookies: e.bool("COOKIE_SECURE", false),
 		Indexer: indexer.Config{
 			BatchSize:    e.int("INDEXER_BATCH_SIZE", 500),
 			IdleInterval: e.duration("INDEXER_IDLE_INTERVAL", 500*time.Millisecond),
@@ -90,6 +115,18 @@ func (e *envReader) duration(key string, def time.Duration) time.Duration {
 		e.errs = append(e.errs, fmt.Errorf("%s: %w", key, err))
 	}
 	return d
+}
+
+func (e *envReader) bool(key string, def bool) bool {
+	v := e.str(key, "")
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s: %w", key, err))
+	}
+	return b
 }
 
 func (e *envReader) err() error { return errors.Join(e.errs...) }
