@@ -24,12 +24,16 @@ Layanan artikel ringan berbasis **Go**, dengan **PostgreSQL** sebagai *source of
 
 ## 1. Menjalankan
 
-Prasyarat: Docker + Docker Compose. Go 1.24+ hanya diperlukan untuk menjalankan test di luar container.
+Prasyarat: Docker + Docker Compose. Go 1.26+ dan Node 22+ hanya diperlukan untuk menjalankan test atau dev server di luar container.
 
 ```bash
-docker compose up -d --build        # postgres, elasticsearch, api (:8080), indexer
-docker compose run --rm seed -articles 1000000   # opsional: data dummy yang timpang
+docker compose up -d --build        # postgres, elasticsearch, storage, api (:8080), indexer, web (:3000)
+docker compose build seed && docker compose run --rm seed -articles 1000000   # opsional: data dummy yang timpang
 ```
+
+Buka **http://localhost:3000**. Admin pertama dibuat otomatis dari `ADMIN_EMAIL`/`ADMIN_PASSWORD` di `docker-compose.yml` (untuk development: `admin@kabar.local` / `admin12345`). User biasa cukup mendaftar dari halaman **Masuk → Daftar**.
+
+Untuk mengembangkan FE dengan hot reload: `cd web && npm install && npm run dev`, lalu buka http://localhost:5173. Proxy Vite meneruskan `/api` ke API di `:8080`, sehingga browser hanya melihat satu origin dan cookie session bekerja tanpa CORS.
 
 Migrasi database dan pembuatan index Elasticsearch berjalan otomatis saat `api`/`indexer` start (idempoten, aman untuk banyak replika).
 
@@ -42,7 +46,7 @@ Kalau port 5432 di host sudah dipakai, jalankan dengan `POSTGRES_PORT=5433 docke
 | `make test-integration` | Integration test ke Postgres + Elasticsearch (butuh `make up`) |
 | `make seed N=5000000` | Mengisi N artikel dummy dengan skew 30% |
 
-Konfigurasi lewat environment variable (lihat `internal/config/config.go`), misalnya `DATABASE_URL`, `ELASTICSEARCH_URL`, `CACHE_TTL`, `DB_MAX_CONNS`, `ES_SHARDS`.
+Konfigurasi lewat environment variable (lihat `internal/config/config.go`), misalnya `DATABASE_URL`, `ELASTICSEARCH_URL`, `STORAGE_ENDPOINT`, `CACHE_TTL`, `DB_MAX_CONNS`, `ES_SHARDS`, `ADMIN_EMAIL`, `COOKIE_SECURE` (aktifkan di belakang HTTPS).
 
 ---
 
@@ -54,9 +58,24 @@ Protokol: **REST/JSON**. Untuk dua endpoint utama dengan pola CRUD sederhana, RE
 |---|---|---|
 | `POST` | `/articles` | **Wajib.** Membuat artikel |
 | `GET` | `/articles` | **Wajib.** List artikel, terbaru dulu. Query: `query`, `author`, `limit` (1–100, default 20), `cursor` |
-| `PATCH` | `/articles/{id}` | Tambahan: edit `title`/`body` (constraint #5) |
-| `POST` | `/authors` | Tambahan: membuat author, karena artikel butuh `author_id` yang valid |
+| `GET` | `/articles/{id}` | Detail artikel beserta galeri, kategori, jumlah suka/komentar, dan `liked_by_me` untuk user yang login |
+| `PATCH` | `/articles/{id}` | Edit `title`/`body`/`category` (constraint #5). Hanya penulis atau admin |
+| `DELETE` | `/articles/{id}` | Soft delete; dokumen di Elasticsearch ikut dihapus lewat outbox. Hanya penulis atau admin |
 | `GET` | `/healthz` | Health check |
+
+`GET /articles` juga menerima `category` (slug) dan `author_id` (satu penulis persis, untuk halaman profil). `POST /articles` menerima JSON, atau `multipart/form-data` bila menyertakan gambar (`images`, `captions`, `cover_index`, maksimal 5 gambar).
+
+Endpoint tambahan untuk fitur portal (detail keputusan desainnya di [docs/ERD.md](docs/ERD.md)):
+
+| Kelompok | Endpoint |
+|---|---|
+| Akun | `POST /auth/register`, `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` (session cookie `HttpOnly`, `SameSite=Lax`) |
+| Katalog | `GET /categories`, `GET /authors/{id}` |
+| Gambar | `POST /articles/{id}/images`, `PUT /articles/{id}/images/order`, `PUT /articles/{id}/images/cover`, `PATCH /images/{id}`, `DELETE /images/{id}`, `GET /media/{key}` |
+| Interaksi | `PUT`/`DELETE /articles/{id}/like`, `GET`/`POST /articles/{id}/comments`, `PATCH`/`DELETE /comments/{id}` |
+| Moderasi (admin) | `GET /admin/users`, `POST`/`DELETE /admin/users/{id}/block`, `GET /admin/comments`, `POST /admin/comments/{id}/restore` |
+
+`POST /authors` dari versi awal dihapus: author kini dibuat otomatis saat registrasi.
 
 ### Contoh
 
@@ -333,9 +352,14 @@ cmd/
 internal/
   article/        domain + use case. Tidak bergantung pada Postgres/ES/HTTP
     model.go      entitas, input, validasi
-    ports.go      interface yang dibutuhkan service (ArticleWriter, AuthorStore, Reader, PageCache)
-    service.go    use case: create/update/list, routing reader, paginasi
+    ports.go      interface yang dibutuhkan service (ArticleWriter, Reader, ImageStore, CommentStore, ...)
+    service.go    use case listing: routing reader, paginasi, enrich
+    writes.go     tulis/edit/hapus artikel dan gambar, cek pemilik
+    engagement.go like dan komentar
     cursor.go     cursor opaque untuk keyset pagination
+  account/        registrasi, login, session, blokir user
+  media/          validasi dan resize gambar (thumbnail 480x300, besar 1600px)
+  storage/        object storage S3-compatible (SeaweedFS lokal, S3/GCS di produksi)
   postgres/       implementasi ports dengan SQL murni (pgx, tanpa ORM) + migrasi
   elasticsearch/  mapping, search, bulk writer (net/http)
   indexer/        loop worker: batch, idle, exponential backoff
@@ -343,6 +367,7 @@ internal/
   httpapi/        handler REST, DTO, pemetaan error, middleware
   config/         environment variables
 migrations/       file SQL yang di-embed ke binary
+web/              frontend React + Vite + TypeScript + TanStack Query (nginx di Docker)
 ```
 
 Penerapan prinsip:
@@ -356,7 +381,7 @@ Penerapan prinsip:
 | **D**ependency Inversion | `article` hanya bergantung pada interface; tipe konkret dirakit di `cmd/*/main.go` |
 | **DRY** | `articleColumns` + `scanArticle` dipakai semua query; `withTx`; builder validasi; satu fungsi pemetaan error |
 | **KISS** | Router standar Go (`net/http`), tanpa framework; klien Elasticsearch tipis; cache in-process |
-| **YAGNI** | Tanpa Redis, partisi, delete, atau sort relevansi sampai benar-benar dibutuhkan, tetapi titik ekstensinya sudah ada |
+| **YAGNI** | Tanpa Redis, partisi, atau sort relevansi sampai benar-benar dibutuhkan, tetapi titik ekstensinya sudah ada |
 
 ---
 
@@ -369,12 +394,14 @@ make up && make test-integration
 
 | Lapisan | Yang diuji |
 |---|---|
-| `article` (unit) | Routing keyword ke Elasticsearch vs Postgres; paginasi `limit+1`; satu nama menjadi banyak id; nama tidak dikenal langsung kosong; validasi; cache key tidak bertabrakan |
+| `article` (unit) | Routing keyword ke Elasticsearch vs Postgres; paginasi `limit+1`; satu nama menjadi banyak id; nama tidak dikenal langsung kosong; validasi; cache key tidak bertabrakan; hanya penulis/admin yang boleh edit/hapus; kategori dan sampul; artikel yang baru dihapus disaring dari hasil search |
+| `account` (unit) | Password di-hash bcrypt, token disimpan sebagai hash, email salah dan password salah memberi jawaban yang sama, user diblokir tidak bisa login, session kedaluwarsa, admin awal idempoten |
+| `media` (unit) | Varian thumbnail dan besar, tidak memperbesar gambar kecil, file bukan gambar ditolak dari isinya |
 | `cache` (unit) | 50 request identik bersamaan = 1 load; TTL; error tidak di-cache; client yang batal tidak membatalkan load bersama |
-| `httpapi` (unit) | Parsing parameter, pemetaan setiap error ke status (termasuk 503 + `Retry-After` untuk gangguan sementara), unknown field ditolak, body terlalu besar, recover dari panic |
+| `httpapi` (unit) | Parsing parameter, pemetaan setiap error ke status (termasuk 503 + `Retry-After` untuk gangguan sementara), unknown field ditolak, body terlalu besar, recover dari panic, multipart dengan beberapa gambar, guest ditolak 401, request lintas situs ditolak 403, write wajib JSON (415), cookie session `HttpOnly` + `SameSite=Lax`, `/media` tidak bisa dipakai path traversal |
 | `elasticsearch` (unit, `httptest`) | Bentuk query (filter context, `search_after`, `terms`), NDJSON bulk dengan external version, 409 = sukses, kegagalan nyata dilaporkan, timeout/429/503 ditandai sementara sedangkan 400 tidak, `EnsureIndex` idempoten |
 | `indexer` (unit) | Batch diteruskan ke sink, gagal = event tetap di outbox, worker terus retry |
-| `postgres` (integration) | Insert + outbox dalam satu transaksi, author tidak ada = 422 tanpa sisa outbox, edit parsial + `created_at` tetap, paging tanpa celah/duplikat termasuk timestamp kembar, nama sama beda huruf besar/kecil, outbox menggabungkan duplikat |
+| `postgres` (integration) | Insert + outbox dalam satu transaksi, author tidak ada tanpa sisa outbox, edit parsial + `created_at` tetap, paging tanpa celah/duplikat termasuk timestamp kembar, nama sama beda huruf besar/kecil, outbox menggabungkan duplikat; email unik case-insensitive, session kedaluwarsa dan blokir mengakhiri session, like dobel dihitung sekali, counter komentar mengikuti hapus/pulihkan, batas 5 gambar, urut ulang penuh (deferred unique), tepat satu sampul, soft delete hilang dari feed |
 | `elasticsearch` (integration) | Pencarian campuran ID/EN (stemming dua bahasa, case-insensitive, AND lintas bahasa), filter author + urutan + `search_after`, versi lama tidak menimpa versi baru |
 
 Semua test memakai library standar `testing`, tanpa framework assertion.
