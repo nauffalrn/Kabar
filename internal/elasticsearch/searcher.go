@@ -61,6 +61,9 @@ func buildSearchRequest(p article.ListParams) map[string]any {
 	if len(p.AuthorIDs) > 0 {
 		filters = append(filters, map[string]any{"terms": map[string]any{"author_id": p.AuthorIDs}})
 	}
+	if p.CategoryID != "" {
+		filters = append(filters, map[string]any{"term": map[string]any{"category_id": p.CategoryID}})
+	}
 
 	req := map[string]any{
 		"size":             p.Limit,

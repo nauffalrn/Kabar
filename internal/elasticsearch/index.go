@@ -22,6 +22,7 @@ type document struct {
 	ID         string    `json:"id"`
 	AuthorID   string    `json:"author_id"`
 	AuthorName string    `json:"author_name"`
+	CategoryID string    `json:"category_id,omitempty"`
 	Title      string    `json:"title"`
 	Body       string    `json:"body"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -30,14 +31,14 @@ type document struct {
 
 func toDocument(a article.Article) document {
 	return document{
-		ID: a.ID, AuthorID: a.AuthorID, AuthorName: a.AuthorName,
+		ID: a.ID, AuthorID: a.AuthorID, AuthorName: a.AuthorName, CategoryID: a.CategoryID,
 		Title: a.Title, Body: a.Body, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 }
 
 func (d document) toArticle() article.Article {
 	return article.Article{
-		ID: d.ID, AuthorID: d.AuthorID, AuthorName: d.AuthorName,
+		ID: d.ID, AuthorID: d.AuthorID, AuthorName: d.AuthorName, CategoryID: d.CategoryID,
 		Title: d.Title, Body: d.Body, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
 	}
 }
@@ -80,6 +81,7 @@ func indexDefinition(cfg IndexConfig) map[string]any {
 				"id":          map[string]any{"type": "keyword"},
 				"author_id":   map[string]any{"type": "keyword"},
 				"author_name": map[string]any{"type": "keyword", "index": false},
+				"category_id": map[string]any{"type": "keyword"},
 				"title":       textField(),
 				"body":        textField(),
 				"created_at":  map[string]any{"type": "date"},
@@ -94,7 +96,7 @@ func indexDefinition(cfg IndexConfig) map[string]any {
 func EnsureIndex(ctx context.Context, c *Client, cfg IndexConfig) error {
 	err := c.doJSON(ctx, http.MethodHead, "/_alias/"+cfg.Alias, nil, nil)
 	if err == nil {
-		return nil
+		return addNewFields(ctx, c, cfg.Alias)
 	}
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
@@ -107,6 +109,16 @@ func EnsureIndex(ctx context.Context, c *Client, cfg IndexConfig) error {
 	}
 	if err != nil {
 		return fmt.Errorf("create index: %w", err)
+	}
+	return nil
+}
+
+// addNewFields adds fields introduced after the index was created. Adding a
+// field is allowed even with "dynamic": "strict"; changing one needs a reindex.
+func addNewFields(ctx context.Context, c *Client, alias string) error {
+	body := map[string]any{"properties": map[string]any{"category_id": map[string]any{"type": "keyword"}}}
+	if err := c.doJSON(ctx, http.MethodPut, "/"+alias+"/_mapping", body, nil); err != nil {
+		return fmt.Errorf("update mapping: %w", err)
 	}
 	return nil
 }

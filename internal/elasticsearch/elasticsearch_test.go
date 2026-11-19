@@ -186,6 +186,24 @@ func TestWriter_ConflictMeansAlreadyUpToDate(t *testing.T) {
 	}
 }
 
+func TestWriter_DeletedArticleBecomesVersionedDelete(t *testing.T) {
+	srv := &recordingServer{reply: `{"errors":true,"items":[{"delete":{"_id":"ar1","status":404}}]}`}
+	err := NewWriter(srv.start(t), "articles").Upsert(context.Background(), []article.Article{{ID: "ar1", Version: 4, Deleted: true}})
+	if err != nil {
+		t.Fatalf("deleting a document that was never indexed is fine, got %v", err)
+	}
+	if !strings.Contains(srv.body, `"delete"`) || !strings.Contains(srv.body, `"version":4`) || strings.Contains(srv.body, `"title"`) {
+		t.Fatalf("want a versioned delete without a document body, got %s", srv.body)
+	}
+}
+
+func TestBuildSearchRequest_CategoryFilter(t *testing.T) {
+	body, _ := json.Marshal(buildSearchRequest(article.ListParams{Query: "banjir", CategoryID: "ekonomi", Limit: 5}))
+	if !strings.Contains(string(body), `{"term":{"category_id":"ekonomi"}}`) {
+		t.Fatalf("category should be a term filter, got %s", body)
+	}
+}
+
 func TestWriter_RealFailureIsReported(t *testing.T) {
 	srv := &recordingServer{reply: `{"errors":true,"items":[
 		{"index":{"_id":"ar1","status":400,"error":{"type":"mapper_parsing_exception"}}}]}`}
@@ -198,13 +216,13 @@ func TestWriter_RealFailureIsReported(t *testing.T) {
 func TestEnsureIndex(t *testing.T) {
 	cfg := IndexConfig{Alias: "articles", Name: "articles_v1", Shards: 1}
 
-	t.Run("alias exists: nothing to do", func(t *testing.T) {
+	t.Run("alias exists: only adds new fields to the mapping", func(t *testing.T) {
 		srv := &recordingServer{status: 200}
 		if err := EnsureIndex(context.Background(), srv.start(t), cfg); err != nil {
 			t.Fatal(err)
 		}
-		if srv.method != http.MethodHead {
-			t.Fatalf("should only check the alias, last call was %s", srv.method)
+		if srv.method != http.MethodPut || srv.path != "/articles/_mapping" || !strings.Contains(srv.body, `"category_id"`) {
+			t.Fatalf("want PUT /articles/_mapping adding category_id, got %s %s %s", srv.method, srv.path, srv.body)
 		}
 	})
 
