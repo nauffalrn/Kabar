@@ -5,6 +5,11 @@ bin/
 *.out
 coverage.*
 
+# frontend
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
 # env / secrets
 .env
 .env.*
@@ -18,4 +23,6 @@ Thumbs.db
 # local tooling & private notes (not part of the submission repo)
 .claude/
 CLAUDE.md
+.impeccable/
+PRODUCT.md
 *.pdf

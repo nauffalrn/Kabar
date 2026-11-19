@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "kabar-api",
+      "credentials": [{ "accessKey": "kabar", "secretKey": "kabar-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

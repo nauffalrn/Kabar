@@ -1,6 +1,9 @@
 x-app-env: &app-env
   DATABASE_URL: postgres://postgres:postgres@postgres:5432/articles?sslmode=disable
   ELASTICSEARCH_URL: http://elasticsearch:9200
+  STORAGE_ENDPOINT: storage:8333
+  STORAGE_ACCESS_KEY: kabar # local development only
+  STORAGE_SECRET_KEY: kabar-secret
 
 services:
   postgres:
@@ -31,14 +34,37 @@ services:
       interval: 5s
       retries: 40
 
+  # S3-compatible object storage for article images (SeaweedFS).
+  storage:
+    image: chrislusf/seaweedfs:3.80
+    command: ["server", "-ip.bind=0.0.0.0", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json"]
+    ports: ["8333:8333"]
+    volumes:
+      - storagedata:/data
+      - ./deploy/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro # local development credentials
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8333"]
+      interval: 3s
+      retries: 30
+
   api:
     build: .
     command: ["api"]
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # Seeds the first admin; local development only.
+      ADMIN_EMAIL: admin@kabar.local
+      ADMIN_PASSWORD: admin12345
     ports: ["8080:8080"]
     depends_on:
       postgres: { condition: service_healthy }
       elasticsearch: { condition: service_healthy }
+      storage: { condition: service_healthy }
+
+  web:
+    build: ./web
+    ports: ["3000:80"]
+    depends_on: [api]
 
   indexer:
     build: .
@@ -60,3 +86,4 @@ services:
 volumes:
   pgdata:
   esdata:
+  storagedata:
